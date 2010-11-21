@@ -1,0 +1,167 @@
+(progn 
+(load "/home/tomd/programs/lisp/maths.lisp")
+(proclaim '(inline scalar-pot vector-pot q-add))
+(proclaim '(optimize (speed 3) (compilation-speed 0) (debug 3)))
+
+(defconstant epsi0 8.85418782d-12)
+(defconstant mu0  (/ 1 c0 c0 epsi0))
+(defconstant e-charge -1.60217646d-19)
+(defconstant p-mass 1.67262158d-27)
+(defconstant e-mass 9.10938188d-31)
+(defconstant delta-t 1d-3)
+(defconstant length-scale 1d-1)
+(defconstant +n-ions+ 1)
+
+(defparameter *grid* (make-array '(7 7 7) :initial-element '(0 0 0 0 0 0 0 0 0) :element-type 'list))
+
+;(defparameter *pre-pos* ;the previous positions/velocities of the ions dt/2 ago
+;  (make-array `(,+n-ions+ 6) :element-type 'double-float))
+
+(defmacro posx (n)   `(the double-float (aref *ion-array* ,n 0)))
+(defmacro posy (n)   `(the double-float (aref *ion-array* ,n 1)))
+(defmacro posz (n)   `(the double-float (aref *ion-array* ,n 2)))
+(defmacro velx (n)   `(the double-float (aref *ion-array* ,n 3)))
+(defmacro vely (n)   `(the double-float (aref *ion-array* ,n 4)))
+(defmacro velz (n)   `(the double-float (aref *ion-array* ,n 5)))
+(defmacro charge (n) `(the double-float (aref *ion-array* ,n 6)))
+(defmacro mass (n)   `(the double-float (aref *ion-array* ,n 7)))
+
+(dotimes (i +n-ions+)
+  (let ((r (coerce (gauss-random length-scale (* length-scale 3)) 'double-float))
+	(theta (coerce (random (* 2 pi)) 'double-float))
+	(z (coerce (gauss-random length-scale) 'double-float))
+	(charge -1));(* 1d0 (expt -1d0 (random 2)))))
+    (setf (posx i) (coerce (* r (cos theta)) 'double-float)
+	  (posy i) (coerce (* r (sin theta)) 'double-float)
+	  (posz i) z
+	  (velx i) (* 1d-5 (- 1 (random 3)))
+	  (vely i) (* 1d-5 (- 1 (random 3)))
+	  (velz i) (* 1d-5 (- 1 (random 3)))
+	  (charge i) charge
+	  (mass i) (if (= charge -1) 1d0 1839d0))))
+
+(defun q-add (x y z)
+  (declare (type double-float x y z))
+  (sqrt (+ (* x x) (* y y) (* z z))))
+
+(defun scalar-pot (x y z &optional (self -1))
+  (declare (type double-float x y z)
+	   (type fixnum self))
+  (let ((ans 0d0))
+    (dotimes (i +n-ions+)
+      (if (= i self)()
+	  (decf ans (/ (charge i)
+		       (the double-float (q-add (- x (posx i)) (- y (posy i)) (- z (posz i))))
+		       (* 4 pi epsi0)))))
+    	ans))
+
+(defun vector-pot (x y z &optional (self -1))
+  (declare (type double-float x y z)
+	   (type fixnum self))
+  (let ((ax 0d0)(ay 0d0)(az 0d0))
+    (dotimes (i +n-ions+)
+      (if (= i self) ()
+	  (let ((r (the double-float (q-add (- x (posx i)) (- y (posy i)) (- z (posz i))))))
+	    (incf ax (/ (* (charge i) (velx i) (/ mu0 4 pi)) r))
+	    (incf ay (/ (* (charge i) (vely i) (/ mu0 4 pi)) r))
+	    (incf az (/ (* (charge i) (velx i) (/ mu0 4 pi)) r)))))
+	(list ax ay az)))
+
+(defun update-grid (&optional (ext-B #'(lambda(x y z &optional max)(declare (ignore x y z)) '(0 0 0))) (max 1))
+  (let ((E-field (grad (memoize #'scalar-pot)))
+	(B-field (curl (memoize #'vector-pot))))
+    (dotimes (i 7)
+      (dotimes (j 7)
+	(dotimes (k 7)
+;	  (format t "~&~S ~S ~S"(+ (* 0.5 i length-scale) (* -1.5 length-scale))
+;			            (+ (* 0.5 j length-scale) (* -1.5 length-scale))
+;				    (+ (* 0.5 k length-scale) (* -1.5 length-scale)))
+
+	  (let* ((pos (list (+ (* i length-scale) (* -3 length-scale))
+			    (+ (* j length-scale) (* -3 length-scale))
+			    (+ (* 0.5 k length-scale) (* -1.5 length-scale))))
+		 (E (apply E-field pos))
+		 (B (vec+ (apply B-field pos) (apply ext-B (append pos `(,max))))));electrostatic assumption: curl(E)+~0 
+	    (setf (aref *grid* i j k) (nconc E B pos))))))))
+
+(defun update-pos (&optional (dt delta-t))
+  (dotimes (i +n-ions+)
+    (incf (posx i) (* (velx i) dt))
+    (incf (posy i) (* (vely i) dt))
+    (incf (posz i) (* (velz i) dt))))
+
+
+
+(defun update-vel (&optional (dt delta-t))
+  (declare (type double-float dt))
+  (dotimes (n +n-ions+)
+    (let ((i (/ (+ (* 3 length-scale) (posx n))  length-scale))
+	  (j (/ (+ (* 3 length-scale) (posy n))  length-scale))
+	  (k (/ (+ (* 1.5 length-scale) (posz n)) 0.5 length-scale)))
+      (if (or (< i 0) (>= i 6) (< j 0) (>= j 6) (< k 0) (>= k 6)) (format t "~&~S oob:~S ~S ~S~&" n i j k)
+	  (multiple-value-bind (i_a i_b) (floor i)
+	    (multiple-value-bind (j_a j_b) (floor j)
+	      (multiple-value-bind (k_a k_b) (floor k)
+		(let ((E (list (+ (* (nth 0 (aref *grid* i_a j_a k_a)) i_b) 
+				  (* (nth 0 (aref *grid* (+ i_a 1) j_a k_a)) (- 1 i_b)))
+			       (+ (* (nth 1 (aref *grid* i_a j_a k_a)) j_b) 
+				  (* (nth 1 (aref *grid* i_a (+ j_a 1) k_a)) (- 1 j_b)))
+			       (+ (* (nth 2 (aref *grid* i_a j_a k_a)) k_b) 
+				  (* (nth 2 (aref *grid* i_a j_a (+ k_a 1))) (- 1 k_b)))))
+		      (B (list (+ (* (nth 3 (aref *grid* i_a j_a k_a)) i_b) 
+				  (* (nth 3 (aref *grid* (+ i_a 1) j_a k_a)) (- 1 i_b)))
+			       (+ (* (nth 4 (aref *grid* i_a j_a k_a)) j_b) 
+				  (* (nth 4 (aref *grid* i_a (+ j_a 1) k_a)) (- 1 j_b)))
+			       (+ (* (nth 5 (aref *grid* i_a j_a k_a)) k_b) 
+				  (* (nth 5 (aref *grid* i_a j_a (+ k_a 1))) (- 1 k_b))))))
+		  (incf (velx n) (* 0.5d0 (the double-float (nth 0 E)) dt (/ q m)))
+		  (incf (vely n) (* 0.5d0 (the double-float (nth 1 E)) dt (/ q m))) ;half accel from E
+		  (incf (velz n) (* 0.5d0 (the double-float (nth 2 E)) dt (/ q m)))
+		  (dbind ((x y z)) (matrix-multiply (cons (list (velx n) (vely n) (velz n)) nil) (rot-mat B (* dt (/ (charge n) (mass n)) (apply #'q-add B))))
+		    (setf (velx n) x
+			  (vely n) y
+			  (velz n) z))   ;rotation of vel from B
+		  (incf (velx n) (* (the double-float (nth 0 E)) dt (/ q m)))
+		  (incf (vely n) (* (the double-float (nth 1 E)) dt (/ q m)))
+		  (incf (velz n) (* (the double-float (nth 2 E)) dt (/ q m))))))))))) ;half accel from E
+
+(defmemo toroidal (x y z &optional (max 1))
+  (declare (type double-float x y z))
+  (if (and (= x 0)(= y 0)) '(0 0 0)
+      (let* ((r (sqrt (+ (* x x) (* y y))))
+	     (A (* max (expt +e+ (- (/ (expt (- r length-scale) 2) 2 length-scale)))
+		       (expt +e+ (- (/ (* z z) 2 length-scale))))))
+	(vec-scale (vec-norm (list (- y)
+				   x
+				   0)) A))))
+
+(defun main (&optional (ticks 100))
+;  (format t "~&n:0~%X:(~S ~S ~S)~%V:(~S ~S ~S)~%" (posx 1)(posy 1)(posz 1)(velx 1)(vely 1)(velz 1))
+  (update-grid)
+  (dotimes (_ ticks)
+    (update-pos)
+    (update-grid)
+    (update-vel)
+;    (format t "~&n:~S~%X:(~S ~S ~S)~%V:(~S ~S ~S)~%" (+ _ 1) (posx 1)(posy 1)(posz 1)(velx 1)(vely 1)(velz 1))
+    (with-open-file (stream "dat1" :direction :output :if-exists :append :if-does-not-exist :create)
+      (format stream "~&~S ~S ~S~&" (coerce (posx 1) 'single-float)(coerce (posy 1) 'single-float)(coerce (posz 1) 'single-float)))
+    (with-open-file (stream "dat2" :direction :output :if-exists :append :if-does-not-exist :create)
+      (format stream "~&~S ~S ~S~&" (coerce (posx 2) 'single-float)(coerce (posy 2) 'single-float)(coerce (posz 2) 'single-float)))
+    (with-open-file (stream "dat3" :direction :output :if-exists :append :if-does-not-exist :create)
+      (format stream "~&~S ~S ~S~&" (coerce (posx 0) 'single-float)(coerce (posy 0) 'single-float)(coerce (posz 0) 'single-float)))))
+
+
+;;;readouts
+(defun positions (stream)
+  (dotimes (i +n-ions+)
+    (format stream "~&~s ~s ~s~&" (coerce (posx i) 'single-float)(coerce (posy i) 'single-float)(coerce (posz i) 'single-float))))
+
+(defun velocities (stream)
+  (dotimes (i +n-ions+)
+    (format stream "~&~s ~s ~s~&" (coerce (velx i) 'single-float)(coerce (vely i) 'single-float)(coerce (velz i) 'single-float))))
+
+(defun x-v-dx (stream &optional (dy (/ length-scale 5)) (dz (/ length-scale 5)))
+  (dotimes (i +n-ions+)
+    (if (and (< (abs (posy i)) dy)(< (abs (posz i)) dz))
+	(format stream "~&~s ~s~&" (coerce (posx i) 'single-float)(coerce (velx i) 'single-float)))))
+)

@@ -1,0 +1,99 @@
+(load "/home/tom/progams/lisp/maths.lsp")
+(load "/home/tom/programs/lisp/util.lsp")
+(proclaim '(inline scalar-pot vector-pot))
+(proclaim '(optimize speed))
+
+(defstruct ion
+  (mass)
+  (charge)
+  (pos)
+  (mom))
+
+(defvar *ion-array*
+  (make-array '(1000) :initial-element (make-ion)))
+
+(let ((ion (make-ion :mom '(0 0 0))))
+  (dotimes (i (length *ion-array*))
+    (let ((r (gauss-random 100 500))
+	  (theta (random (* 2 pi)))
+	  (z (gauss-random 100)))
+      (setf (ion-pos ion) (list (* r (cos theta))
+				(* r (sin theta))
+				 z))
+      (setf (ion-charge ion) (expt -1 (random 2)))
+      (setf (ion-mass ion) (if (> 0 (ion-charge ion))
+			       1836
+			       1))
+      
+      (setf (aref *ion-array* i) (copy-ion ion)))))
+
+(defun scalar-pot (x y z)
+  (declare (type float x y z))
+  (reduce #'+
+	  (map 'vector
+	       #[let ((R (quad-add (- x (the float (car  (ion-pos $))))
+				   (- y (the float (cadr  (ion-pos $))))
+				   (- z (the float (caddr (ion-pos $)))))))
+	           (if (= r 0) 0
+		       (/ (the integer (ion-charge $)) r))]
+	       *ion-array*)))
+
+(defun vector-pot (x y z)
+  (declare (type float x y z))
+  (reduce #'vec+
+	  (map 'vector
+	       #[let ((r (quad-add (- x (car  (ion-pos $)))
+				   (- y (cadr  (ion-pos $)))
+				   (- z (caddr (ion-pos $))))))
+	            (if (= r 0) '(0 0 0)
+			(mapcar #'(lambda (x) (/ x r (ion-mass $))) (ion-mom $)))]
+	       *ion-array*)))
+
+(defun lorentz (E-f B-f ion)
+  (vec-scale (vec+ E-f
+		   (vec-cross B-f (mapcar #[/ $ (ion-mass ion)] (ion-mom ion))))
+	     (ion-charge ion)))
+
+(defun main()
+(dotimes (j 100)
+  (let ((phi (memoize #'scalar-pot))
+	(A   (memoize #'vector-pot)))
+
+    (defun B-field (x y z)
+      (declare (type float x y z))
+      (let* ((R (quad-add x y))
+	     (theta (cond ((and (= x 0) (>  y 0)) (* pi 1/2))
+			  ((and (= x 0) (<= y 0)) (* pi 3/2))
+			  ((and (> x 0) (>= y 0)) (atan (/ y x)))
+			  ((and (> x 0) (<  y 0)) (+ pi pi (atan (/ y x))))
+			  ((< x 0)                (+ pi (atan (/ y x))))))
+	     (normal (if (= r 0) '(0 0 0)
+			 (list (- (/ (sin theta) (quad-add (sin theta)(cos theta))))
+			       (/ (cos theta)(quad-add (sin theta)(cos theta)))
+			       0))))
+	(vec+ 
+	 (funcall (curl A) x y z)
+	 (vec-scale normal (/ (max 1 (quad-add (- r 500) z)))))))
+
+    (defun E-field (x y z)
+      (declare (type float x y z))
+      (mapcar #[- $] (funcall (grad phi) x y z)))
+
+    (print j)
+    (print (aref *ion-array* 200))
+
+    (let ((temp (make-array (1- (length *ion-array*)))))
+      (dotimes (i (length *ion-array*))
+	(let ((ion (copy-ion (aref *ion-array* i))))
+	  (setf (ion-pos ion) (vec+ (ion-pos ion)
+				    (vec-scale (ion-mom ion) (/ (ion-mass ion)))))
+	  (setf (ion-mom ion) (vec+ (ion-mom ion) (lorentz (apply #'E-field (ion-pos ion))
+							   (apply #'B-field (ion-pos ion))
+							   ion)))
+	  (setf (aref temp i) ion)))
+      (dotimes (i (length temp))
+	(setf (aref *ion-array* i) (aref temp i)))))))
+
+
+
+;;;program isnt working as each ion's own fields are included in its lorentz calculation, need to prevent this to stop rapid divergence
