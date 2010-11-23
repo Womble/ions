@@ -2,7 +2,7 @@
 (proclaim '(inline scalar-pot vector-pot rot-mat q-add))
 (proclaim '(optimize (speed 3) (compilation-speed 0) (debug 3)))
 
-;;low ion but no field interpolation version
+
 
 (defconstant epsi0 8.85418782d-12)
 (defconstant mu0  (/ 1 c0 c0 epsi0))
@@ -15,6 +15,8 @@
 
 (defparameter *ion-array*
   (make-array `(,+n-ions+ 8) :element-type 'double-float))
+(defparameter *grid* 
+  (make-array '(7 7 7) :initial-element '(0 0 0 0 0 0 0 0 0) :element-type 'list))
 
 (defmacro posx (n)   `(the double-float (aref *ion-array* ,n 0)))
 (defmacro posy (n)   `(the double-float (aref *ion-array* ,n 1)))
@@ -29,7 +31,7 @@
   (let ((r (coerce (gauss-random length-scale (* length-scale 3)) 'double-float))
 	(theta (coerce (random (* 2 pi)) 'double-float))
 	(z (coerce (gauss-random length-scale) 'double-float))
-	(charge (* 1d0 (expt -1d0 (random 2)))))
+	(charge (* 1d0 (expt -1d0 (mod i 2)))))
     (setf (posx i) (coerce (* r (cos theta)) 'double-float)
 	  (posy i) (coerce (* r (sin theta)) 'double-float)
 	  (posz i) z
@@ -38,8 +40,6 @@
 	  (velz i) (* 1d-5 (- 1d0 (random 3)))
 	  (charge i) charge
 	  (mass i) (if (= charge -1) 1d0 1839d0))))
-
-
 
 
 (defun scalar-pot (x y z &optional (self -1))
@@ -66,7 +66,8 @@
 
 (defun s-grad (fn)
   "gradient of 3D scalar field given by FN"
-  #'(lambda (x y z self)
+  #'(lambda (x y z &optional (self -1))
+      (declare (type double-float x y z))
       (list (funcall (partial-diff fn 0 4) x y z self)
 	    (funcall (partial-diff fn 1 4) x y z self)
 	    (funcall (partial-diff fn 2 4) x y z self))))
@@ -76,7 +77,8 @@
   (let ((d/dx (partial-diff-vec fn 0 4))
 	(d/dy (partial-diff-vec fn 1 4))
 	(d/dz (partial-diff-vec fn 2 4)))
-  #'(lambda (x y z self)
+  #'(lambda (x y z &optional (self -1))
+      (declare (type double-float x y z))
       (let ((ddx (funcall d/dx x y z self))
 	    (ddy (funcall d/dy x y z self))
 	    (ddz (funcall d/dz x y z self)))
@@ -91,62 +93,30 @@
   (declare (type double-float x y z))
   (sqrt (+ (* x x) (* y y) (* z z))))
 
-(defun rot-mat (vec theta)
-  "creates the rotation matrix for rotation of angle theta about vec"
-  (let* ((cosin (coerce (cos theta) 'double-float))
-	 (sine  (coerce (sin theta) 'double-float))
-	 (1-cos (coerce (- 1 cosin) 'double-float))
-	 (vec-normalised (vec-norm vec))
-	 (ux (coerce (car   vec-normalised) 'double-float))
-	 (uy (coerce (cadr  vec-normalised) 'double-float))
-	 (uz (coerce (caddr vec-normalised) 'double-float)))
-    `((   ,(+ cosin (* ux ux 1-cos))    ,(- (* ux uy 1-cos) (* uz sine))  ,(+ (* ux uz 1-cos) (* uy sine) ))
-      (,(+ (* uy ux 1-cos) (* uz sine))    ,(+ cosin (* uy uy 1-cos))     ,(- (* uy uz 1-cos) (* ux sine) ))
-      (,(- (* uz ux 1-cos) (* uy sine)) ,(+ (* uz uy 1-cos) (* ux sine))     ,(+ cosin (* uz uz 1-cos)    ))) ))
+(defun update-grid (&optional (ext-B-field #'(lambda (x y z) (declare (ignore x y z)) '(0 0 0))))
+  (dotimes (i 7)
+    (dotimes (j 7)
+      (dotimes (k 7)
+	(let* ((pos (list (coerce (- (* i 2/3) 2) 'double-float) (coerce (- (* j 2/3) 2) 'double-float) (coerce (- (* k 2/3) 2) 'double-float)))
+	       (E-field (s-grad (memoize #'scalar-pot)))
+	       (B-field (s-curl (memoize #'vector-pot)))
+	       (B (vec+ (apply ext-b-field pos) (apply B-field pos)))
+	       (E (apply E-field pos)))
+	  (setf (aref *grid* i j k) (append E B Pos)))))))
 
-(defun main (&optional (ticks 100))
-  (with-open-file (stream "dat-start-pos" :direction :output :if-exists :supersede :if-does-not-exist :create)
-    (positions stream))
-  (with-open-file (stream "dat-start-vel" :direction :output :if-exists :supersede :if-does-not-exist :create)
-    (velocities stream))
-  (with-open-file (stream "dat-start-x-vx" :direction :output :if-exists :supersede :if-does-not-exist :create)
-    (x-v-vx stream))
+(defun interpolate (pos)
+  (dbind (i j k) (mapcar #[* 3/2 (+ 2 $)] pos)
+    (multiple-value-bind (i_a i_b) (floor i)    ;i_a is the x reference of the cell in position below the position (i.e the first cell with a position < the position) 
+      (multiple-value-bind (j_a j_b) (floor j)  ;i_b is the fraction of the way it it between the inferior grid reference and the superior one
+	(multiple-value-bind (k_a k_b) (floor k)
+	  (if (or (< i 0) (>= i 6) (< j 0) (>= j 6) (< k 0) (>= k 6))
+	      '(0d0 0d0 0d0 0d0 0d0 0d0)
+	      (dbind ((exa eya eza bxa bya bza) (exb eyb ezb bxb byb bzb))
+		  (list (aref *grid* i_a j_a k_a) (aref *grid* (1+ i_a) (1+ j_a) (1+ k_a)))
+		(list (+ (* exa i_b) (* exb (- 1 i_b))) (+ (* eya j_b) (* eyb (- 1 j_b))) (+ (* eza k_b) (* ezb (- 1 k_b)))
+		      (+ (* bxa i_b) (* bxb (- 1 i_b))) (+ (* bya j_b) (* byb (- 1 j_b))) (+ (* bza k_b) (* bzb (- 1 k_b)))))))))))
 
-  (dotimes (i ticks)
-
-    (with-open-file (stream "dat1" :direction :output :if-exists :append :if-does-not-exist :create)
-      (format stream "~&~S ~S ~S~&" (coerce (posx 1) 'single-float)(coerce (posy 1) 'single-float)(coerce (posz 1)'single-float)))
-    (with-open-file (stream "dat2" :direction :output :if-exists :append :if-does-not-exist :create)
-      (format stream "~&~S ~S ~S~&" (coerce (posx 2) 'single-float)(coerce (posy 2) 'single-float)(coerce (posz 2)'single-float)))
-    (with-open-file (stream "dat3" :direction :output :if-exists :append :if-does-not-exist :create)
-      (format stream "~&~S ~S ~S~&" (coerce (posx 3) 'single-float)(coerce (posy 3) 'single-float)(coerce (posz 3)'single-float)))
-    (with-open-file (stream "dat4" :direction :output :if-exists :append :if-does-not-exist :create)
-      (format stream "~&~S ~S ~S~&" (coerce (posx 4) 'single-float)(coerce (posy 4) 'single-float)(coerce (posz 4)'single-float)))
-    (with-open-file (stream "datEEs" :direction :output :if-exists :append :if-does-not-exist :create)
-      (format stream "~&~S " i)(E-electro stream))
-    (with-open-file (stream "datEK" :direction :output :if-exists :append :if-does-not-exist :create)
-      (format stream "~&~S " i)(E-kinetic stream))
-
-    (dotimes (n +n-ions+)
-      (incf (posx n) (* (velx n) delta-t))
-      (incf (posy n) (* (vely n) delta-t))
-      (incf (posz n) (* (velz n) delta-t))
-      (let ((pos (list (posx n)(posy n)(Posz n) n))
-	    (E-field (s-grad (memoize #'scalar-pot)))
-	    (B-field (s-curl (memoize #'vector-pot))))
-	(let ((B (vec+ '(0 0 1) (apply B-field pos)))
-	      (E (apply E-field pos)))
-	  (incf (velx n) (* 0.5d0 (the double-float (nth 0 E)) delta-t (/ (charge n) (mass n))))
-	  (incf (vely n) (* 0.5d0 (the double-float (nth 1 E)) delta-t (/ (charge n) (mass n)))) ;half accel from E
-	  (incf (velz n) (* 0.5d0 (the double-float (nth 2 E)) delta-t (/ (charge n) (mass n))))
-	  (dbind ((x y z)) (matrix-multiply (cons (list (velx n) (vely n) (velz n)) nil) (rot-mat B (* delta-t (/ (charge n) (mass n)) (apply #'q-add B))))
-	    (setf (velx n) x
-		  (vely n) y
-		  (velz n) z))
-	  (incf (velx n) (* 0.5d0 (the double-float (nth 0 E)) delta-t (/ (charge n) (mass n))))
-	  (incf (vely n) (* 0.5d0 (the double-float (nth 1 E)) delta-t (/ (charge n) (mass n)))) ;half accel from E
-	  (incf (velz n) (* 0.5d0 (the double-float (nth 2 E)) delta-t (/ (charge n) (mass n)))))))))
-
+  
 
 ;;;readouts
 (defun positions (stream)
@@ -172,3 +142,57 @@
     (dotimes (i +n-ions+)
       (incf ans (* (mass i) (expt (q-add (velx i)(vely i)(velz i)) 2) 0.5)))
     (format stream "~S~&" (coerce ans 'single-float))))
+
+
+
+(defun main (&optional (ticks 100))
+  (with-open-file (stream "dat/dat-start-pos" :direction :output :if-exists :supersede :if-does-not-exist :create)
+    (positions stream))
+  (with-open-file (stream "dat/dat-start-vel" :direction :output :if-exists :supersede :if-does-not-exist :create)
+    (velocities stream))
+  (with-open-file (stream "dat/dat-start-x-vx" :direction :output :if-exists :supersede :if-does-not-exist :create)
+    (x-v-vx stream))
+
+  (with-open-file (stream1 "dat/dat1"   :direction :output :if-exists :supersede :if-does-not-exist :create)
+    (with-open-file (stream2 "dat/dat2"   :direction :output :if-exists :supersede :if-does-not-exist :create)
+      (with-open-file (stream3 "dat/dat3"   :direction :output :if-exists :supersede :if-does-not-exist :create)
+	(with-open-file (stream4 "dat/dat4"   :direction :output :if-exists :supersede :if-does-not-exist :create)
+	  (with-open-file (streamEE "dat/datEEs" :direction :output :if-exists :supersede :if-does-not-exist :create)
+	    (with-open-file (streamEK "dat/datEK"  :direction :output :if-exists :supersede :if-does-not-exist :create)
+
+	      
+	      (dotimes (i ticks)
+		
+		(format streamEK "~&~S " i)(E-kinetic streamEK)
+		(format streamEE "~&~S " i)(E-electro streamEE)
+		(format stream4 "~&~S ~S ~S~&" (coerce (posx 4) 'single-float)(coerce (posy 4) 'single-float)(coerce (posz 4)'single-float))
+		(format stream3 "~&~S ~S ~S~&" (coerce (posx 3) 'single-float)(coerce (posy 3) 'single-float)(coerce (posz 3)'single-float))
+		(format stream2 "~&~S ~S ~S~&" (coerce (posx 2) 'single-float)(coerce (posy 2) 'single-float)(coerce (posz 2)'single-float))
+		(format stream1 "~&~S ~S ~S~&" (coerce (posx 1) 'single-float)(coerce (posy 1) 'single-float)(coerce (posz 1)'single-float))
+    
+    
+		(update-grid)
+		(dotimes (n +n-ions+)
+		  (incf (posx n) (* (velx n) delta-t))
+		  (incf (posy n) (* (vely n) delta-t))
+		  (incf (posz n) (* (velz n) delta-t))
+		  (let ((pos (list (posx n)(posy n)(Posz n))))
+		    (dbind (ex ey ez bx by bz) (interpolate pos)
+		      (incf (velx n) (* 0.5d0 (the double-float ex) delta-t (/ (charge n) (mass n))))
+		      (incf (vely n) (* 0.5d0 (the double-float ey) delta-t (/ (charge n) (mass n)))) ;half accel from E
+		      (incf (velz n) (* 0.5d0 (the double-float ez) delta-t (/ (charge n) (mass n))))
+		      (dbind ((x y z)) (matrix-multiply (cons (list (velx n) (vely n) (velz n)) nil) 
+							(rot-mat (list Bx by bz) (* delta-t (/ (charge n) (mass n)) (q-add Bx by bz))))
+			(setf (velx n) x
+			      (vely n) y   ;rotation from B field
+			      (velz n) z))
+		      (incf (velx n) (* 0.5d0 (the double-float ex) delta-t (/ (charge n) (mass n))))
+		      (incf (vely n) (* 0.5d0 (the double-float ey) delta-t (/ (charge n) (mass n)))) ;half accel from E
+		      (incf (velz n) (* 0.5d0 (the double-float ez) delta-t (/ (charge n) (mass n))))))))))))))
+
+  (with-open-file (stream "dat/dat-final-pos" :direction :output :if-exists :supersede :if-does-not-exist :create)
+    (positions stream))
+  (with-open-file (stream "dat/dat-final-vel" :direction :output :if-exists :supersede :if-does-not-exist :create)
+    (velocities stream))
+  (with-open-file (stream "dat/dat-final-x-vx" :direction :output :if-exists :supersede :if-does-not-exist :create)
+    (x-v-vx stream)))
